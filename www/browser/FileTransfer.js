@@ -211,6 +211,118 @@ FileTransfer.prototype.upload = function(filePath, server, successCallback, erro
 };
 
 /**
+ * Given an instance of `File`, uploads a file on the device to a remote server
+ * using a multipart HTTP request.
+ * @param file {File}                 `File` object representing the file to be uploaded
+ * @param server {String}             URL of the server to receive the file
+ * @param successCallback (Function}  Callback to be invoked when upload has completed
+ * @param errorCallback {Function}    Callback to be invoked upon error
+ * @param options {FileUploadOptions} Optional parameters such as file name and mimetype
+ * @param trustAllHosts {Boolean} Optional trust all hosts (e.g. for self-signed certs), defaults to false
+ */
+FileTransfer.prototype.uploadRawFile = function(file, server, successCallback, errorCallback, options) {
+    // check for arguments
+    argscheck.checkArgs('*sFFO*', 'FileTransfer.uploadRawFile', arguments);
+
+    // Check if target URL doesn't contain spaces. If contains, it should be escaped first
+    // (see https://github.com/apache/cordova-plugin-file-transfer/blob/master/doc/index.md#upload)
+    if (!checkURL(server)) {
+        if (errorCallback) {
+            errorCallback(new FileTransferError(FileTransferError.INVALID_URL_ERR, file, server));
+        }
+        return;
+    }
+
+    options = options || {};
+
+    var fileKey = options.fileKey || "file";
+    var params = options.params || {};
+    var withCredentials = options.withCredentials || false;
+    // var chunkedMode = !!options.chunkedMode; // Not supported
+    var headers = options.headers || {};
+    var httpMethod = options.httpMethod && options.httpMethod.toUpperCase() === "PUT" ? "PUT" : "POST";
+
+    var basicAuthHeader = getBasicAuthHeader(server);
+    if (basicAuthHeader) {
+        server = server.replace(getUrlCredentials(server) + '@', '');
+        headers[basicAuthHeader.name] = basicAuthHeader.value;
+    }
+
+    var that = this;
+    var xhr = transfers[this._id] = new XMLHttpRequest();
+    xhr.withCredentials = withCredentials;
+
+    var fail = errorCallback && function(code, status, response) {
+        if (transfers[this._id]) {
+            delete transfers[this._id];
+        }
+        var error = new FileTransferError(code, file, server, status, response);
+        if (errorCallback) {
+            errorCallback(error);
+        }
+    };
+
+    // Prepare form data to send to server
+    var fd = new FormData();
+    fd.append(fileKey, file);
+    for (var prop in params) {
+        if (params.hasOwnProperty(prop)) {
+            fd.append(prop, params[prop]);
+        }
+    }
+
+    xhr.open(httpMethod, server);
+
+    // Fill XHR headers
+    for (var header in headers) {
+        if (headers.hasOwnProperty(header)) {
+            xhr.setRequestHeader(header, headers[header]);
+        }
+    }
+
+    xhr.onload = function() {
+        if (this.status === 200) {
+            var result = new FileUploadResult(); // jshint ignore:line
+            result.bytesSent = file.size;
+            result.responseCode = this.status;
+            result.response = this.response;
+            delete transfers[that._id];
+            successCallback(result);
+        } else if (this.status === 404) {
+            fail(FileTransferError.INVALID_URL_ERR, this.status, this.response);
+        } else {
+            fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
+        }
+    };
+
+    xhr.ontimeout = function() {
+        fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
+    };
+
+    xhr.onerror = function() {
+        fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
+    };
+
+    xhr.onabort = function () {
+        fail(FileTransferError.ABORT_ERR, this.status, this.response);
+    };
+
+    xhr.upload.onprogress = function (e) {
+        if (that.onprogress) {
+            that.onprogress(e);
+        }
+    };
+
+    xhr.send(fd);
+    // Special case when transfer already aborted, but XHR isn't sent.
+    // In this case XHR won't fire an abort event, so we need to check if transfers record
+    // isn't deleted by filetransfer.abort and if so, call XHR's abort method again
+    if (!transfers[that._id]) {
+        xhr.abort();
+    }
+};
+
+/**
  * Downloads a file form a given URL and saves it to the specified directory.
  * @param source {String}          URL of the server to receive the file
  * @param target {String}         Full path of the file on the device
@@ -232,7 +344,7 @@ FileTransfer.prototype.download = function(source, target, successCallback, erro
     }
 
     options = options || {};
-    
+
     var headers = options.headers || {};
     var withCredentials = options.withCredentials || false;
 
